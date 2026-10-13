@@ -1,0 +1,7 @@
+outbox/
+secrets/*
+!secrets/.gitignore
+__pycache__/
+*.pyc
+inbox/*
+!inbox/.gitkeep

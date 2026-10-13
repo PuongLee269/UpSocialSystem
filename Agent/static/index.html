@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Agent đăng video</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<a class="skip" href="#main">Bỏ qua tới nội dung chính</a>
+<div class="shell">
+  <header class="top">
+    <div>
+      <div class="brand">Agent xuất bản · chạy trên máy này</div>
+      <h1 class="title">Từ video đến YouTube riêng tư</h1>
+      <p class="sub">Làm lần lượt 8 bước. Video chỉ được tải lên ở chế độ riêng tư; công khai là một bước tách biệt, cần xác nhận thủ công.</p>
+    </div>
+    <div class="badges" id="banners" aria-live="polite"></div>
+  </header>
+
+  <nav aria-label="Các bước" class="stepper-wrap"><ol class="stepper" id="stepper"></ol></nav>
+
+  <div id="alert" class="alert hidden" role="alert"></div>
+
+  <main id="main" class="layout" tabindex="-1">
+    <section class="card" id="stage" aria-live="polite" aria-busy="false"></section>
+    <aside class="card side" id="side" aria-label="Tóm tắt job"></aside>
+  </main>
+</div>
+
+<dialog id="publicDialog" aria-labelledby="pdTitle"></dialog>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<noscript><p class="alert">Cần bật JavaScript để dùng giao diện này.</p></noscript>
+<script type="module" src="/static/app.js"></script>
+</body>
+</html>

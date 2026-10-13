@@ -1,0 +1,10 @@
+{
+  "video_roots": ["inbox"],
+  "outbox": "outbox",
+  "ollama_url": "http://127.0.0.1:11434",
+  "ollama_model": "",
+  "comfyui_url": "",
+  "comfyui_workflow": "",
+  "platforms": ["youtube", "tiktok", "instagram", "facebook"],
+  "posting_mode": "review_only"
+}
