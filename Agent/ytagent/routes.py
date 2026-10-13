@@ -16,11 +16,11 @@ from pathlib import Path
 from urllib.parse import quote, unquote
 
 from . import jobs as jobs_mod
-from . import paths, thumbnail
+from . import art_director, paths, thumbnail
 from . import youtube as youtube_mod
 from .workflow import ApiError, UploadFlow, sync_status, vidiq_brief
 
-PREFIXES = ("/api/jobs", "/api/vidiq", "/api/integrations", "/api/templates")
+PREFIXES = ("/api/jobs", "/api/vidiq", "/api/integrations", "/api/templates", "/api/imagegen")
 VIDIQ_URL = "https://app.vidiq.com/"
 AI_FLAGS = ("ai_content", "ai_thumbnail", "ai_text")
 CONTACT_N = 12
@@ -74,7 +74,7 @@ def _clean_section(section: str, data: dict) -> dict:
 
 class Api:
     def __init__(self, outbox, roots, find_video, yt=youtube_mod, client=None, yt_status=None,
-                 ollama_status=None):
+                 ollama_status=None, ollama_generate=None, imagegen_cfg=None, imagegen=None):
         self.outbox = Path(outbox)
         self.store = jobs_mod.JobStore(self.outbox)
         self.roots, self.find_video = roots, find_video
@@ -82,6 +82,7 @@ class Api:
         self.yt_status = yt_status or yt.status
         self.ollama_status = ollama_status or (lambda: {"available": None, "note": "Xem /api/health."})
         self._render_lock = threading.Lock()
+        self.ollama_generate, self._imagegen_cfg, self._imagegen = ollama_generate, imagegen_cfg, imagegen
         self.flow = UploadFlow(self.store, yt, client, lambda: self.yt_status(), self._video_path, self._approved_thumb)
 
     # ---------- tiện ích ----------
@@ -129,7 +130,7 @@ class Api:
             return 409, {"error": str(exc), "code": "conflict", "reasons": []}
         except jobs_mod.InvalidError as exc:
             return 400, {"error": str(exc), "code": "invalid", "reasons": []}
-        except thumbnail.ThumbnailError as exc:
+        except (thumbnail.ThumbnailError, ValueError) as exc:
             return 400, {"error": str(exc), "code": "invalid", "reasons": []}
         except jobs_mod.JobError as exc:
             return 500, {"error": str(exc), "code": "invalid", "reasons": []}
@@ -138,6 +139,8 @@ class Api:
         if path == "/api/integrations" and method == "GET":
             return 200, {"youtube": self.yt_status(), "vidiq": {"connected": False, "mode": "manual"},
                          "ollama": self.ollama_status()}
+        if path == "/api/imagegen/status" and method == "GET":
+            return 200, self._imagegen_status()
         if path == "/api/vidiq/brief" and method == "GET":
             job = self.store.get((query.get("job") or [""])[0])
             return 200, {"text": vidiq_brief(job), "url": VIDIQ_URL}
@@ -171,6 +174,14 @@ class Api:
             return 200, self._render(job_id, body)
         if tail == "thumbnail/approve" and method == "POST":
             return 200, self._approve(job_id, body)
+        if tail == "thumbnail/ai" and method == "GET":
+            return 200, self._ai_state(job_id)
+        if tail == "thumbnail/ai-concepts" and method == "POST":
+            return 200, self._ai_concepts(job_id, body)
+        if tail == "thumbnail/ai-generate" and method == "POST":
+            return 200, self._ai_generate(job_id, body)
+        if tail == "thumbnail/style-reference" and method == "POST":
+            return 200, self._style_reference(job_id, body)
         if tail == "upload-private" and method == "POST":
             return 200, self.flow.upload_private(job_id)
         if tail == "go-public" and method == "POST":
@@ -247,3 +258,172 @@ class Api:
         job = self.store.update(job_id, lambda j: {**j, "thumbnail": {**j["thumbnail"], "approved_version": version}},
                                 event="thumbnail_approve", detail=f"v{version}")
         return sync_status(self.store, job)
+
+    # ---------- Art Director / thumbnail AI local ----------
+    def _ig(self):
+        if self._imagegen is not None:
+            return self._imagegen
+        try:
+            from . import imagegen
+        except ImportError:
+            return None
+        return imagegen
+
+    def _ig_cfg(self) -> dict:
+        cfg = self._imagegen_cfg() if callable(self._imagegen_cfg) else self._imagegen_cfg
+        return cfg if isinstance(cfg, dict) else {}
+
+    def _imagegen_status(self) -> dict:
+        ig = self._ig()
+        if ig is None:
+            return {"configured": False, "reachable": False, "workflows": [], "local_only": True,
+                    "reason": "Module imagegen chưa có trong bản cài này."}
+        st = dict(ig.status(self._ig_cfg()))
+        st.setdefault("configured", False)
+        st["local_only"] = True
+        st["workflows"] = []
+        if st["configured"]:
+            try:
+                st["workflows"] = ig.list_workflows(self._ig_workflow_dir())
+            except Exception as exc:  # thư mục workflow lỗi không được làm hỏng trạng thái
+                st["workflow_error"] = str(exc)
+        return st
+
+    def _ig_workflow_dir(self) -> str:
+        cfg = self._ig_cfg()
+        return str(cfg.get("comfyui_workflows_dir") or "workflows")
+
+    def _ai_file(self, job_id: str, name: str) -> Path:
+        return self._job_dir(job_id) / "ai" / name
+
+    def _read_ai(self, job_id: str) -> dict:
+        try:
+            return json.loads(self._ai_file(job_id, "concepts.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def _style_info(self, job_id: str) -> dict:
+        present = self._ai_file(job_id, "style_ref.jpg").is_file()
+        return {"present": present, "url": _file_url(job_id, "ai/style_ref.jpg") if present else None,
+                "used_by_workflow": False,
+                "note": "Ảnh tham chiếu chỉ lưu trong job trên máy này, không gửi ra ngoài; workflow hiện "
+                        "KHÔNG dùng nó (chỉ để bạn đối chiếu phong cách)."}
+
+    def _ai_state(self, job_id: str) -> dict:
+        self.store.get(job_id)
+        data = self._read_ai(job_id)
+        return {"brief": data.get("brief", ""), "concepts": data.get("concepts", []), "source": data.get("source"),
+                "note": data.get("note", ""), "style_reference": self._style_info(job_id)}
+
+    def _ai_concepts(self, job_id: str, body: dict) -> dict:
+        job = self.store.get(job_id)
+        brief = str(body.get("brief", "")).strip()[:1000]
+        if not brief:
+            raise ApiError(400, "invalid", "Hãy nhập brief (ý tưởng thumbnail) trước.")
+        style = self._style_info(job_id)
+        result = art_director.make_concepts(job, brief, self.ollama_generate, style["present"])
+        out = self._ai_file(job_id, "concepts.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        thumbnail._atomic_write_json(out, {"brief": brief, **result})
+        return {"brief": brief, **result, "style_reference": style}
+
+    def _style_reference(self, job_id: str, body: dict) -> dict:
+        self.store.get(job_id)
+        target = self._ai_file(job_id, "style_ref.jpg")
+        if body.get("clear"):
+            target.unlink(missing_ok=True)
+            return self._style_info(job_id)
+        import base64
+        import binascii
+        import io
+        try:
+            raw = base64.b64decode(str(body.get("data_base64", "")).split(",")[-1], validate=True)
+        except (binascii.Error, ValueError):
+            raise ApiError(400, "invalid", "Dữ liệu ảnh tham chiếu không hợp lệ.") from None
+        thumbnail._need_pillow()
+        try:
+            from PIL import Image
+            with Image.open(io.BytesIO(raw)) as im:
+                im = im.convert("RGB")
+                im.thumbnail((768, 768))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                im.save(target, "JPEG", quality=88)  # tái mã hóa: bỏ metadata, chắc chắn là ảnh
+        except (OSError, ValueError):
+            raise ApiError(400, "invalid", "File không phải ảnh hợp lệ.") from None
+        return self._style_info(job_id)
+
+    def _pick_concept(self, job_id: str, body: dict) -> dict:
+        index = body.get("concept_index")
+        if index is not None:
+            concepts = self._read_ai(job_id).get("concepts") or []
+            if not isinstance(index, int) or isinstance(index, bool) or not 0 <= index < len(concepts):
+                raise ApiError(400, "invalid", "Phương án không tồn tại; hãy tạo phương án trước.")
+            return {**concepts[index]}
+        return {"style_name": "Prompt tự nhập", "negative": art_director.DEFAULT_NEGATIVE, "mode": "img2img",
+                "denoise": 0.55, "text_overlay": "", "font_preset": "",
+                "prompt": str(body.get("prompt", "")).strip()[:900]}
+
+    def _ai_generate(self, job_id: str, body: dict) -> dict:
+        job = self.store.get(job_id)
+        ig = self._ig()
+        st = self._imagegen_status()
+        if ig is None or not st.get("configured"):
+            raise ApiError(409, "not_configured",
+                           "ComfyUI local chưa được cấu hình nên chưa thể tạo ảnh AI (ứng dụng không giả lập ảnh). "
+                           "Hãy cài ComfyUI, điền comfyui_url và workflow trong config.json rồi thử lại.",
+                           [st.get("reason", "")])
+        if st.get("reachable") is False:
+            raise ApiError(409, "not_configured", "ComfyUI đã cấu hình nhưng không phản hồi; hãy khởi động ComfyUI.",
+                           [st.get("reason", "")])
+        concept = self._pick_concept(job_id, body)
+        if not concept["prompt"]:
+            raise ApiError(400, "invalid", "Cần chọn phương án (concept_index) hoặc nhập prompt.")
+        index = body.get("frame_index", job["frame"].get("selected_index"))
+        if not isinstance(index, int) or isinstance(index, bool):
+            raise ApiError(400, "invalid", "Cần chọn frame trước khi tạo ảnh AI.")
+        job_dir = self._job_dir(job_id)
+        frame = job_dir / "frames" / f"frame-{index:02}.jpg"
+        if not frame.is_file():
+            raise ApiError(400, "invalid", "Frame chưa được tạo; hãy mở bước chọn frame trước.")
+        mode = body.get("mode") or concept["mode"]
+        if mode not in art_director.MODES:
+            raise ApiError(400, "invalid", "mode chỉ gồm: " + ", ".join(art_director.MODES) + ".")
+        denoise = art_director._num(body.get("denoise"), concept["denoise"], 0.05, 1.0)
+        seed = body.get("seed")
+        if seed is not None and (not isinstance(seed, int) or isinstance(seed, bool) or seed < 0):
+            raise ApiError(400, "invalid", "seed phải là số nguyên không âm (hoặc để trống để ngẫu nhiên).")
+        workflow = str(body.get("workflow") or "")[:120]
+        try:
+            gen = ig.generate(self._ig_cfg(), workflow, str(frame), concept["prompt"], concept["negative"],
+                              mode, denoise, seed, None, str(job_dir / "ai"))
+        except ig.ImageGenError as exc:
+            raise ApiError(502, "imagegen_failed", f"Tạo ảnh AI thất bại: {exc}") from None
+        ai_file = Path(gen["file"])
+        ai_file = ai_file if ai_file.is_absolute() else job_dir / "ai" / ai_file
+        text = str(body["text"] if body.get("text") is not None else concept["text_overlay"])[:200]
+        name = str(body.get("template", "")).strip()[:60]
+        templates = thumbnail.load_templates(self.outbox / "templates.json")
+        crop = job["frame"].get("crop169") if job["frame"].get("selected_index") == index else None
+        crop = {k: crop[k] for k in _CROP_KEYS} if crop else None
+        with self._render_lock:
+            version = thumbnail.next_version(job_dir / "thumbs")
+            rel = f"thumbs/v{version}.jpg"
+            result = thumbnail.render_thumbnail(ai_file, job_dir / rel, text, templates.get(name), None, crop)
+        warnings = list(gen.get("warnings") or []) + list(result.get("warnings") or [])
+        if mode == "inpaint_bg":
+            warnings.append("Chế độ inpaint_bg chỉ vẽ lại nền; AI không đổi mặt nhân vật.")
+        entry = {**thumbnail.history_entry(version, rel, name, text, f"AI: {concept['style_name']}"),
+                 "ai_generated": True, "prompt": concept["prompt"], "negative": concept["negative"],
+                 "seed": gen.get("seed"), "workflow": gen.get("workflow", workflow), "mode": mode,
+                 "denoise": denoise, "ai_source_file": f"ai/{ai_file.name}"}
+
+        def add(j):
+            flags = list((j.get("checklist") or {}).get("ai_flags") or [])
+            if "ai_thumbnail" not in flags:
+                flags.append("ai_thumbnail")
+            return {**j, "checklist": {**j["checklist"], "ai_flags": flags},
+                    "thumbnail": {**j["thumbnail"], "versions": list(j["thumbnail"]["versions"]) + [entry]}}
+        self.store.update(job_id, add, event="thumbnail_ai_generate", detail=f"v{version} seed={gen.get('seed')}")
+        return {"version": version, "file": rel, "url": _file_url(job_id, rel), "ai_generated": True,
+                "prompt": concept["prompt"], "seed": gen.get("seed"), "warnings": warnings,
+                "style_reference": self._style_info(job_id)}

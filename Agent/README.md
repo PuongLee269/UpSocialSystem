@@ -58,7 +58,15 @@ VidIQ **chưa được kết nối API**. Bước VidIQ chỉ tạo "brief" (chu
 
 - Chỉ YouTube; TikTok/Instagram/Facebook chưa có uploader (chỉ chừa chỗ trong schema `platforms`).
 - Checklist chính sách/bản quyền chỉ là nhắc việc, không đảm bảo tuân thủ hay clear bản quyền.
-- Không gen ảnh AI; thumbnail dựng từ frame thật của video (cắt 16:9, chữ, vùng an toàn).
+- Thumbnail mặc định dựng từ frame thật của video (cắt 16:9, chữ, vùng an toàn). Ảnh AI chỉ là tùy chọn (mục dưới).
+
+## Thumbnail AI local (Art Director, tùy chọn)
+
+Trong bước Thumbnail, khối "Thiết kế bằng AI local": nhập brief -> tạo tối đa 3 phương án (một lần gọi Ollama local; không có Ollama thì dùng template cố định và UI ghi rõ "không phải AI") -> chọn phương án -> tạo ảnh bằng ComfyUI local (`comfyui_url` + workflow trong `config.json`, xem `/api/imagegen/status`). Chưa cấu hình ComfyUI thì API trả 409 `not_configured`, không giả lập ảnh.
+- Ảnh AI thành một version mới trong lịch sử, gắn nhãn "ẢNH AI" kèm prompt/seed/workflow; chữ tiếng Việt vẫn do ứng dụng vẽ chồng; vẫn phải duyệt thủ công; tự bật cờ `ai_thumbnail` trong checklist.
+- Ảnh tham chiếu phong cách chỉ lưu trong job (`jobs/<id>/ai/`), không gửi ra ngoài; workflow hiện chưa dùng nó.
+- Chế độ `inpaint_bg` chỉ vẽ lại nền, không đổi mặt nhân vật. Hãy kiểm tra chính sách nội dung AI/tiết lộ nội dung tổng hợp của YouTube trước khi đăng.
+- API: `GET /api/imagegen/status`, `POST /api/jobs/<id>/thumbnail/ai-concepts|ai-generate|style-reference`, `GET /api/jobs/<id>/thumbnail/ai`.
 - Không lên lịch đăng; không có tài khoản/đa người dùng; chỉ dùng trên máy local.
 - Upload dùng một luồng đồng bộ trong request; video rất lớn có thể làm trình duyệt chờ lâu (tiến độ chưa hiển thị).
 - Nguồn video lấy từ `video_roots` trong `config.json` (hiện chưa quét trực tiếp Google Drive cloud).

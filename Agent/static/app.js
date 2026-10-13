@@ -11,7 +11,7 @@ const CHECKS = [
 const AI_FLAGS = [['ai_content', 'Nội dung có AI hỗ trợ'], ['ai_thumbnail', 'Thumbnail có AI hỗ trợ'], ['ai_text', 'Tiêu đề/mô tả có AI hỗ trợ']];
 const LS_JOB = 'agent.currentJob';
 
-const S = { videos: [], filter: '', job: null, jobs: [], step: 0, integ: null, frames: [], templates: {}, thumbSel: null, busy: 0, loadErr: null };
+const S = { videos: [], filter: '', job: null, jobs: [], step: 0, integ: null, frames: [], templates: {}, thumbSel: null, busy: 0, loadErr: null, ai: null };
 const $ = (s) => document.querySelector(s);
 
 // ---------- helpers ----------
@@ -92,12 +92,12 @@ async function reloadJob() {
 }
 async function openJob(id) {
   adopt(await api(`/api/jobs/${encodeURIComponent(id)}`));
-  S.frames = []; S.thumbSel = null;
+  S.frames = []; S.thumbSel = null; S.ai = null;
   S.step = firstOpenStep(); renderAll();
 }
 async function createJob(videoId) {
   adopt(await api('/api/jobs', { method: 'POST', body: { video_id: videoId } }));
-  S.frames = []; S.step = firstOpenStep(); renderAll();
+  S.frames = []; S.ai = null; S.step = firstOpenStep(); renderAll();
 }
 
 // ---------- trạng thái bước ----------
@@ -349,9 +349,86 @@ function stepThumb(stage) {
     field('Ghi chú cho lần tạo này (tùy chọn)', note),
     h('h3', {}, 'Brief / prompt để dùng với công cụ ảnh'), h('pre', { class: 'brief', tabindex: '0' }, brief),
     h('button', { class: 'btn secondary', type: 'button', onclick: () => copyText(brief) }, 'Chép brief')));
+  stage.append(aiBlock(text, tplName));
+  if (cur && cur.ai_generated) stage.append(h('div', { class: 'status warn' }, h('strong', {}, 'ẢNH AI · '),
+    `prompt: ${cur.prompt || ''} · seed: ${cur.seed ?? '—'} · workflow: ${cur.workflow || '—'} · chế độ: ${cur.mode || '—'}`));
   if (vers.length) stage.append(h('h3', {}, 'Lịch sử phiên bản'), h('ul', { class: 'versions' }, vers.map((x) => h('li', {}, h('button', { type: 'button', 'aria-pressed': cur && cur.v === x.v ? 'true' : 'false',
-    onclick: () => { S.thumbSel = x.v; renderStage(); } }, `v${x.v}${t.approved_version === x.v ? ' ✓' : ''} · ${x.text || 'không chữ'}`)))));
+    onclick: () => { S.thumbSel = x.v; renderStage(); } }, `v${x.v}${t.approved_version === x.v ? ' ✓' : ''}${x.ai_generated ? ' · ẢNH AI' : ''} · ${x.text || 'không chữ'}`)))));
   navRow(stage, t.approved_version != null);
+}
+// Khối "Thiết kế bằng AI local" (Art Director + ComfyUI). Mọi thứ chạy trên localhost.
+async function loadAi() {
+  const id = S.job.id;
+  const [status, state] = await Promise.all([api('/api/imagegen/status'), api(`/api/jobs/${id}/thumbnail/ai`)]);
+  if (S.job && S.job.id === id) { S.ai = { id, status, ...state, sel: S.ai && S.ai.sel != null ? S.ai.sel : 0, last: S.ai && S.ai.last }; renderStage(); }
+}
+function fileToJpegBase64(file, max = 512) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file); const img = new Image();
+    img.onload = () => {
+      const k = Math.min(1, max / Math.max(img.width, img.height)); const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(img.width * k)); c.height = Math.max(1, Math.round(img.height * k));
+      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height); URL.revokeObjectURL(url);
+      resolve(c.toDataURL('image/jpeg', 0.85).split(',')[1]);
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new ApiError(0, { error: 'File không phải ảnh đọc được.' })); };
+    img.src = url;
+  });
+}
+function aiBlock(textInput, tplInput) {
+  const box = h('section', { class: 'stack ai-block', style: 'margin-top:18px', 'aria-label': 'Thiết kế bằng AI local' });
+  box.append(h('h3', {}, 'Thiết kế bằng AI local'));
+  if (!S.ai || S.ai.id !== S.job.id) { run(null, loadAi, false); box.append(h('p', { class: 'hint' }, 'Đang kiểm tra ComfyUI local…')); return box; }
+  const ai = S.ai; const st = ai.status || {}; const ready = !!st.configured && st.reachable !== false;
+  box.append(h('p', { class: `status ${ready ? 'ok' : 'warn'}` }, ready
+    ? `ComfyUI local sẵn sàng${st.workflows && st.workflows.length ? ` · ${st.workflows.length} workflow` : ' · chưa thấy workflow nào'}.`
+    : `ComfyUI chưa sẵn sàng: ${st.reason || 'chưa cấu hình'}. Điền comfyui_url và workflow trong config.json; chưa cấu hình thì không tạo được ảnh AI (ứng dụng không giả lập ảnh).`));
+  box.append(h('ul', { class: 'hint' },
+    h('li', {}, 'Chữ tiếng Việt luôn do ứng dụng vẽ chồng lên, không để model vẽ chữ. Mọi dữ liệu xử lý trên máy này.'),
+    h('li', {}, 'AI không đổi mặt nhân vật ở chế độ inpaint_bg (chỉ vẽ lại nền).'),
+    h('li', {}, 'Nhắc: kiểm tra chính sách nội dung AI/tiết lộ nội dung tổng hợp của YouTube; ảnh AI vẫn phải được bạn duyệt.')));
+  const brief = h('textarea', { rows: 3, maxlength: 1000, placeholder: 'VD: nhân vật đứng trước ngã rẽ, tông ấm, cảm xúc suy tư' }); brief.value = ai.brief || '';
+  box.append(field('Brief thiết kế', brief), h('button', { class: 'btn secondary', type: 'button', onclick: (e) => run(e.currentTarget, async () => {
+    const r = await api(`/api/jobs/${S.job.id}/thumbnail/ai-concepts`, { method: 'POST', body: { brief: brief.value } });
+    S.ai = { ...ai, ...r, sel: 0 }; renderStage(); toast(r.source === 'template' ? 'Đã tạo phương án từ template (không phải AI).' : 'Đã tạo phương án.');
+  }) }, 'Tạo phương án'));
+  if (ai.note) box.append(h('p', { class: `status ${ai.source === 'template' ? 'warn' : ''}` }, ai.note));
+  const concepts = ai.concepts || [];
+  const prompt = h('textarea', { rows: 3, maxlength: 900 });
+  const mode = h('select', {}, ['img2img', 'inpaint_bg'].map((m) => h('option', { value: m }, m)));
+  const denoise = h('input', { type: 'number', min: 0.05, max: 1, step: 0.05 });
+  const seed = h('input', { type: 'number', min: 0, step: 1, placeholder: 'trống = ngẫu nhiên' });
+  const wf = h('select', {}, [h('option', { value: '' }, '(mặc định)'), ...(st.workflows || []).map((w) => h('option', { value: typeof w === 'string' ? w : w.name }, typeof w === 'string' ? w : w.name))]);
+  const fill = (i) => { const c = concepts[i]; if (!c) return; prompt.value = c.prompt; mode.value = c.mode; denoise.value = c.denoise; };
+  if (concepts.length) {
+    box.append(h('div', { role: 'radiogroup', 'aria-label': 'Phương án' }, concepts.map((c, i) => h('label', { class: 'field' },
+      h('span', {}, h('input', { type: 'radio', name: 'aiConcept', checked: ai.sel === i, onchange: () => { ai.sel = i; fill(i); } }),
+        ` ${c.style_name} · ${c.mode} · chữ: ${c.text_overlay || '—'}${c.font_preset ? ` · font ${c.font_preset}` : ''}`)))));
+    fill(ai.sel || 0);
+    box.append(field('Prompt (sửa được)', prompt), h('div', { class: 'row' }, field('Chế độ', mode), field('Denoise', denoise), field('Seed', seed), field('Workflow', wf)));
+  }
+  const ref = ai.style_reference || {};
+  const file = h('input', { type: 'file', accept: 'image/*', onchange: (e) => { const f = e.target.files[0]; if (!f) return; run(null, async () => {
+    const r = await api(`/api/jobs/${S.job.id}/thumbnail/style-reference`, { method: 'POST', body: { data_base64: await fileToJpegBase64(f) } });
+    S.ai = { ...ai, style_reference: r }; renderStage(); toast('Đã lưu ảnh tham chiếu trong job.');
+  }, false); } });
+  box.append(field('Ảnh tham chiếu phong cách (tùy chọn, lưu cục bộ trong job)', file),
+    ref.present && h('div', { class: 'row' }, h('img', { src: ref.url, alt: 'Ảnh tham chiếu phong cách', style: 'max-height:80px;border-radius:8px' }),
+      h('button', { class: 'btn secondary', type: 'button', onclick: (e) => run(e.currentTarget, async () => {
+        const r = await api(`/api/jobs/${S.job.id}/thumbnail/style-reference`, { method: 'POST', body: { clear: true } }); S.ai = { ...ai, style_reference: r }; renderStage();
+      }) }, 'Xóa ảnh tham chiếu')),
+    h('p', { class: 'hint' }, ref.note || 'Ảnh tham chiếu không gửi ra ngoài; workflow hiện chưa dùng nó.'));
+  if (concepts.length) box.append(h('button', { class: 'btn', type: 'button', disabled: !ready, onclick: (e) => run(e.currentTarget, async () => {
+    const body = { prompt: prompt.value, mode: mode.value, denoise: Number(denoise.value), workflow: wf.value, template: tplInput.value.trim() };
+    if (ai.sel != null && concepts[ai.sel] && prompt.value === concepts[ai.sel].prompt) { body.concept_index = ai.sel; }
+    if (seed.value !== '') body.seed = Number(seed.value);
+    if (textInput.value.trim()) body.text = textInput.value;
+    const r = await api(`/api/jobs/${S.job.id}/thumbnail/ai-generate`, { method: 'POST', body });
+    await reloadJob(); S.thumbSel = r.version; S.ai = { ...S.ai, last: r }; renderStage(); toast('Đã tạo ảnh AI (phiên bản mới, chưa duyệt).');
+  }) }, 'Tạo ảnh AI'));
+  if (ai.last) box.append(h('div', { class: 'status' }, `Lần tạo gần nhất: v${ai.last.version} · seed ${ai.last.seed ?? '—'} · prompt: ${ai.last.prompt}`,
+    (ai.last.warnings || []).length ? h('ul', {}, ai.last.warnings.map((w) => h('li', {}, w))) : null));
+  return box;
 }
 async function loadTemplates() {
   const r = await api('/api/templates'); S.templates = { ...(r.templates || r), _loaded: true }; renderStage();

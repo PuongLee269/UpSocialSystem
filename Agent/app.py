@@ -67,7 +67,8 @@ def get_api():
     if API is None:
         from ytagent import routes, youtube
         youtube.configure(str(ROOT / "secrets"))
-        API = routes.Api(OUTBOX, load_roots, find_video, ollama_status=ollama_info)
+        API = routes.Api(OUTBOX, load_roots, find_video, ollama_status=ollama_info,
+                         ollama_generate=ollama_generate, imagegen_cfg=lambda: CONFIG)
     return API
 
 
